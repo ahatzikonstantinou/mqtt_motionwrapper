@@ -2,26 +2,27 @@
 import paho.mqtt.client as mqtt  #import the client1
 import signal   #to detect CTRL C
 import sys
+import os
 import requests # for communication with the cameras
 import json # for publishing status
 
 class MqttParams( object ):
     """ Holds the mqtt connection params
     """
-    def __init__( self, address, port ):
+    def __init__( self, address, port, subscribeTopic, publishTopic ):
         self.address = address
         self.port = port
+        self.subscribeTopic = subscribeTopic
+        self.publishTopic = publishTopic
 
 class Camera( object ):
     """ Holds the basic params of a linux motion camera """
-    def __init__( self, name, subscribeTopic, publishTopic, url, hasPanTilt, startDetection, pauseDetection, getStatus, up, down, left, right, stop ):
+    def __init__( self, name, url, startDetection, pauseDetection, getState, up, down, left, right, stop ):
         self.name = name
-        self.subscribeTopic = subscribeTopic
-        self.publishTopic = publishTopic
         self.url = url
         self.startDetection = startDetection
         self.pauseDetection = pauseDetection
-        self.getStatus = getStatus
+        self.getState = getState
         self.up = up
         self.down = down
         self.left = left
@@ -57,12 +58,15 @@ class MotionWrapper( object ):
         self.client.loop_stop()
         sys.exit(0)        
 
-    def __getAndPublishCameraStatus( self, camera ):
-        status = 'UNAVAILABLE'
-        #TODO
-        response = __getCameraStatus( cam )
-        print( response )
-        self.client.publish( self.mqttParams.publishTopic, json.dumps( { 'camera': cam.name, 'status:' response } ) )
+    def __getAndPublishCameraState( self, camera ):
+        state = 'UNAVAILABLE'
+        try:
+            response = requests.get( camera.getState ).text
+            print( response )
+            state = 'ACTIVE' if 'status ACTIVE' in response else 'PAUSED'
+        except:
+            pass
+        self.client.publish( self.mqttParams.publishTopic, json.dumps( { 'camera': camera.name, 'state': state } ), qos = 2, retain = True )
 
     def __on_connect( self, client, userdata, flags_dict, result ):
         """Executed when a connection with the mqtt broker has been established
@@ -71,17 +75,19 @@ class MotionWrapper( object ):
         m = "Connected flags"+str(flags_dict)+"result code " + str(result)+"client1_id  "+str(client)
         print( m )
 
+        self.client.publish( self.mqttParams.publishTopic, json.dumps({ 'main': 'AVAILABLE' }), qos = 1, retain = True )
         #subscribe to start listening for incomming commands
+        self.client.subscribe( self.mqttParams.subscribeTopic )
+
         for cam in self.cameras:
-            self.client.subscribe( cam.subscribeTopic )
             #get the camera status and publish it
-            self.__getAndPublishCameraStatus( cam )
+            self.__getAndPublishCameraState( cam )
 
     def __on_message( self, client, userdata, message ):
         """Executed when an mqtt arrives
 
         messages format: 
-            "cmd": one of startDetection, pauseDetection, getStatus, up, down, left, right, stop
+            "cmd": one of startDetection, pauseDetection, getState, up, down, left, right, stop
             "camera": name of the camera e.g. 1, or 2, or ...
         """
         text = message.payload.decode( "utf-8" )
@@ -97,31 +103,38 @@ class MotionWrapper( object ):
             cmd = jsonMessage[ 'cmd' ]
             cameraName = jsonMessage[ 'camera' ]
         except:
-            print( '"{}" does not have the proper format i.e. \{"cmd": "one of startDetection, pauseDetection, getStatus, up, down, left, right, stop", "camera": "camera-id"\}'.format( text ) )
-        for cam in cameras:
+            print( '"{}" does not have the proper format i.e. \{"cmd": "one of startDetection, pauseDetection, getState, up, down, left, right, stop", "camera": "camera-id"\}'.format( text ) )
+        for cam in self.cameras:
             if( cam.name == cameraName ):
-                if( cmd == 'startDetection' ):
-                    request.get( cam.startDetection )
-                elif( cmd == 'pauseDetection' ):
-                    request.get( cam.pauseDetection )
-                elif( cmd == 'getStatus' ):
-                    self.__getAndPublishCameraStatus( cam )
-                elif( cmd == 'up' ):
-                    request.get( cam.up )
-                elif( cmd == 'down' ):
-                    request.get( cam.down )
-                elif( cmd == 'left' ):
-                    request.get( cam.left )
-                elif( cmd == 'left' ):
-                    request.get( cam.left )
-                elif( cmd == 'right' ):
-                    request.get( cam.right )
-                elif( cmd == 'stop' ):
-                    request.get( cam.stop )
+                print( 'Found camera name "{}" will execute command "{}"'.format( cameraName, cmd ) )
+                try:
+                    if( cmd == 'startDetection' ):
+                        requests.get( cam.startDetection )
+                        self.__getAndPublishCameraState( cam )
+                    elif( cmd == 'pauseDetection' ):
+                        requests.get( cam.pauseDetection )
+                        self.__getAndPublishCameraState( cam )
+                    elif( cmd == 'getState' ):
+                        self.__getAndPublishCameraState( cam )
+                    elif( cmd == 'up' ):
+                        requests.get( cam.up )
+                    elif( cmd == 'down' ):
+                        requests.get( cam.down )
+                    elif( cmd == 'left' ):
+                        print( 'Sending cmd left to "{}"'.format( cam.left ) )
+                        requests.get( cam.left )
+                    elif( cmd == 'left' ):
+                        requests.get( cam.left )
+                    elif( cmd == 'right' ):
+                        requests.get( cam.right )
+                    elif( cmd == 'stop' ):
+                        requests.get( cam.stop )
+                except Exception, e:
+                    print e.message
         
 
 if( __name__ == '__main__' ):
-    configurationFile = 'motionowrapper.conf'
+    configurationFile = 'motionwrapper.conf'
     if( not os.path.isfile( configurationFile ) ):
         print( 'Configuration file "{}" not found, exiting.'.format( configurationFile ) )
         sys.exit()
@@ -133,21 +146,19 @@ if( __name__ == '__main__' ):
 
         motionWrapper = MotionWrapper( 
             configuration['mqttId'],
-            MqttParams( configuration['mqttParams']['address'], int( configuration['mqttParams']['port'] ) ),
+            MqttParams( configuration['mqttParams']['address'], int( configuration['mqttParams']['port'] ), configuration['mqttParams']['subscribeTopic'], configuration['mqttParams']['publishTopic'] ),
             [
                 Camera( 
-                    configuration['cameras']['name'],
-                    configuration['mqttParams']['subscribeTopic'], 
-                    configuration['mqttParams']['publishTopic']
-                    configuration['cameras']['url'],
-                    configuration['cameras']['startDetection'],
-                    configuration['cameras']['pauseDetection'],
-                    configuration['cameras']['status'],
-                    None if configuration['cameras']['up'] is None else configuration['cameras']['up'],
-                    None if configuration['cameras']['down'] is None else configuration['cameras']['down'],
-                    None if configuration['cameras']['left'] is None else configuration['cameras']['left'],
-                    None if configuration['cameras']['right'] is None else configuration['cameras']['right'],
-                    None if configuration['cameras']['stop'] is None else configuration['cameras']['stop']
+                    x['name'],
+                    x['url'],
+                    x['startDetection'],
+                    x['pauseDetection'],
+                    x['state'],
+                    None if x['up'] is None else x['up'],
+                    None if x['down'] is None else x['down'],
+                    None if x['left'] is None else x['left'],
+                    None if x['right'] is None else x['right'],
+                    None if x['stop'] is None else x['stop']
                 )
                 for x in configuration['cameras']
             ]
